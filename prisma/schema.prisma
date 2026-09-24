@@ -1,0 +1,424 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Pooled connection (PgBouncer, port 6543) - used by the app at runtime.
+  url       = env("DATABASE_URL")
+  // Direct connection (port 5432) - used only by Prisma Migrate, which
+  // cannot run migrations through the connection pooler.
+  directUrl = env("DIRECT_URL")
+}
+
+// NOTE: SQLite has no native enum support in Prisma, so status/type fields
+// below are plain Strings constrained in app code. See lib/constants.ts for
+// the canonical value lists.
+
+// ---------- Auth ----------
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+// ---------- Settings (single row) ----------
+
+model Settings {
+  id                    Int     @id @default(1)
+  businessName          String  @default("Selecta Event")
+  djName                String  @default("Selecta")
+  logoUrl               String  @default("/brand/selecta-logo.png")
+  phone                 String  @default("")
+  businessEmail         String  @default("")
+  instagramUrl          String  @default("")
+  tiktokUrl             String  @default("")
+  facebookUrl           String  @default("")
+  heroHeading           String  @default("Selecta Event")
+  heroSubheading        String  @default("Premium DJ & Event Experiences")
+  heroDescription       String  @default("Nightclubs. Weddings. Private and corporate events. Selecta Event brings a premium sound and lighting experience to every occasion.")
+  bio                   String  @default("")
+  address               String  @default("")
+  showEvents            Boolean @default(false)
+  requireSignedContract Boolean @default(false)
+  senderName            String  @default("Selecta Event")
+  replyToEmail          String  @default("")
+}
+
+// ---------- Clients ----------
+
+model Client {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?
+  phone     String?
+  notes     String   @default("")
+  archived  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Deleting a client is the one genuinely destructive delete in the app -
+  // these all cascade because a quote/booking/contract/payment/receipt with
+  // no client is meaningless. The admin UI discloses this in full before
+  // allowing it. Email logs are the exception: they're a communications
+  // record, not "the client's data", so they're detached instead (SetNull).
+  inquiries Inquiry[]
+  quotes    Quote[]
+  bookings  Booking[]
+  contracts Contract[]
+  payments  Payment[]
+  receipts  Receipt[]
+  emails    EmailLog[]
+}
+
+// ---------- Inquiries (from Get a Quote form) ----------
+// status: NEW | CONTACTED | QUOTE_SENT | ACCEPTED | DECLINED | ARCHIVED
+
+model Inquiry {
+  id             String    @id @default(cuid())
+  client         Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId       String
+  eventType      String
+  eventDate      DateTime?
+  startTime      String?
+  endTime        String?
+  venueName      String?
+  venueAddress   String?
+  guestCount     Int?
+  servicesNeeded String    @default("[]") // JSON array of service names
+  budget         String?
+  musicPrefs     String?
+  notes          String?
+  status         String    @default("NEW")
+  archived       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  quotes Quote[]
+}
+
+// ---------- Quotes ----------
+// status: DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED
+
+model Quote {
+  id            String     @id @default(cuid())
+  number        String     @unique
+  client        Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId      String
+  inquiry       Inquiry?   @relation(fields: [inquiryId], references: [id], onDelete: SetNull)
+  inquiryId     String?
+  eventType     String?
+  eventDate     DateTime?
+  status        String     @default("DRAFT")
+  archived      Boolean    @default(false)
+  lineItems     LineItem[]
+  discountCents Int        @default(0)
+  taxPercent    Float      @default(0)
+  depositCents  Int        @default(0)
+  expiresAt     DateTime?
+  notes         String     @default("")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  sentAt        DateTime?
+  respondedAt   DateTime?
+
+  booking Booking?
+  emails  EmailLog[]
+}
+
+model LineItem {
+  id          String  @id @default(cuid())
+  quote       Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  quoteId     String
+  description String
+  quantity    Int     @default(1)
+  priceCents  Int     @default(0)
+  sortOrder   Int     @default(0)
+}
+
+// ---------- Bookings ----------
+// status: PENDING | CONFIRMED | COMPLETED | CANCELLED
+// source: WEBSITE | INSTAGRAM | WHATSAPP | PHONE | IN_PERSON | OTHER
+
+model Booking {
+  id           String   @id @default(cuid())
+  client       Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId     String
+  quote        Quote?   @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  quoteId      String?  @unique
+  eventType    String
+  eventDate    DateTime
+  startTime    String?
+  endTime      String?
+  venueName    String?
+  venueAddress String?
+  guestCount   Int?
+  services     String   @default("[]") // JSON array of service names
+  totalCents   Int      @default(0)
+  depositCents Int      @default(0)
+  notes        String   @default("")
+  status       String   @default("PENDING")
+  source       String   @default("WEBSITE")
+  archived     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Deleting a booking detaches (not deletes) its contracts/payments/receipts -
+  // that history must survive even if the booking record itself is removed.
+  contracts Contract[]
+  payments  Payment[]
+  receipts  Receipt[]
+  emails    EmailLog[]
+}
+
+// ---------- Contracts ----------
+// status: DRAFT | SENT | VIEWED | SIGNED | DECLINED | EXPIRED | VOIDED
+
+model ContractTemplate {
+  id        String   @id @default(cuid())
+  name      String
+  body      String // text with {{variables}}
+  archived  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contracts Contract[]
+}
+
+model Contract {
+  id            String            @id @default(cuid())
+  number        String            @unique
+  title         String
+  client        Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId      String
+  booking       Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  bookingId     String?
+  template      ContractTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateId    String?
+  body          String // resolved/editable contract text (snapshot, editable until signed)
+  status        String            @default("DRAFT")
+  archived      Boolean           @default(false)
+  publicToken   String            @unique @default(cuid())
+  totalCents    Int               @default(0)
+  depositCents  Int               @default(0)
+  paidCents     Int               @default(0)
+  expiresAt     DateTime?
+  sentAt        DateTime?
+  viewedAt      DateTime?
+  signedAt      DateTime?
+  signerName    String?
+  signatureText String? // legacy typed signature, kept for contracts signed before the drawn pad existed
+  signatureUrl  String? // drawn signature, stored as a PNG in Supabase Storage
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  emails EmailLog[]
+}
+
+// ---------- Payments & Receipts ----------
+// method: ETRANSFER | CASH | CREDIT | DEBIT | OTHER
+// type: DEPOSIT | PARTIAL | FINAL | OTHER
+
+model Payment {
+  id          String   @id @default(cuid())
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId    String
+  booking     Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  bookingId   String?
+  amountCents Int
+  date        DateTime @default(now())
+  method      String   @default("ETRANSFER")
+  type        String   @default("DEPOSIT")
+  notes       String   @default("")
+  archived    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  // A receipt cannot exist without its payment, so it cascades here - this
+  // is the one child-cascade outside of Client, and it's always disclosed
+  // in the payment's delete confirmation.
+  receipt Receipt?
+}
+
+model Receipt {
+  id        String   @id @default(cuid())
+  number    String   @unique
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId  String
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  bookingId String?
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  paymentId String   @unique
+  archived  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  emails EmailLog[]
+}
+
+// ---------- Events & RSVPs ----------
+// status: DRAFT | PUBLISHED | SOLD_OUT | COMPLETED | CANCELLED
+
+model Event {
+  id             String    @id @default(cuid())
+  slug           String    @unique
+  title          String
+  description    String    @default("")
+  posterUrl      String?
+  venueName      String?
+  venueAddress   String?
+  eventDate      DateTime
+  startTime      String?
+  endTime        String?
+  ageRestriction String    @default("All Ages")
+  capacity       Int?
+  rsvpDeadline   DateTime?
+  status         String    @default("DRAFT")
+  archived       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // RSVPs are meaningless without their event, so they cascade - the admin
+  // UI always shows the guest count and requires strong confirmation first.
+  rsvps Rsvp[]
+}
+
+model Rsvp {
+  id        String   @id @default(cuid())
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId   String
+  name      String
+  email     String
+  phone     String?
+  guests    Int      @default(1)
+  createdAt DateTime @default(now())
+}
+
+// ---------- Emails log ----------
+// type: QUOTE | QUOTE_FOLLOWUP | CONTRACT | CONTRACT_REMINDER | BOOKING_CONFIRMATION | RECEIPT |
+//       RSVP_CONFIRMATION | DEPOSIT_REMINDER | BALANCE_REMINDER | FINAL_PAYMENT_REMINDER |
+//       INQUIRY_NOTIFICATION | CONTACT_MESSAGE | CUSTOM
+// status: SENT | FAILED | NOT_CONFIGURED (legacy)
+
+model EmailLog {
+  id         String    @id @default(cuid())
+  to         String
+  subject    String
+  type       String
+  status     String
+  body       String    @default("")
+  error      String?
+  client     Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  clientId   String?
+  contract   Contract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  contractId String?
+  receipt    Receipt?  @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+  receiptId  String?
+  booking    Booking?  @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  bookingId  String?
+  quote      Quote?    @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  quoteId    String?
+  createdAt  DateTime  @default(now())
+}
+
+// ---------- Reminder / notification email templates ----------
+// key: CONTRACT_REMINDER | DEPOSIT_REMINDER | BALANCE_REMINDER | FINAL_PAYMENT_REMINDER | QUOTE_FOLLOWUP
+
+model EmailTemplate {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  subject   String
+  body      String
+  updatedAt DateTime @updatedAt
+}
+
+// ---------- Gallery: tags, albums, items ----------
+// type: PHOTO | VIDEO
+
+model GalleryTag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  createdAt DateTime @default(now())
+
+  items  GalleryItem[]  @relation("ItemTags")
+  albums GalleryAlbum[] @relation("AlbumTags")
+}
+
+model GalleryAlbum {
+  id          String    @id @default(cuid())
+  slug        String    @unique
+  title       String
+  description String    @default("")
+  eventDate   DateTime?
+  visible     Boolean   @default(true)
+  archived    Boolean   @default(false)
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  tags  GalleryTag[]  @relation("AlbumTags")
+  items GalleryItem[]
+}
+
+model GalleryItem {
+  id           String   @id @default(cuid())
+  url          String
+  type         String   @default("PHOTO")
+  caption      String   @default("")
+  width        Int?
+  height       Int?
+  featured     Boolean  @default(false)
+  isAlbumCover Boolean  @default(false)
+  visible      Boolean  @default(true)
+  archived     Boolean  @default(false)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  album   GalleryAlbum? @relation(fields: [albumId], references: [id], onDelete: SetNull)
+  albumId String?
+
+  tags GalleryTag[] @relation("ItemTags")
+}
+
+// ---------- Services ----------
+
+model Service {
+  id                 String  @id @default(cuid())
+  name               String
+  description        String  @default("")
+  imageUrl           String?
+  startingPriceCents Int?
+  visible            Boolean @default(true)
+  archived           Boolean @default(false)
+  sortOrder          Int     @default(0)
+}
+
+// ---------- Testimonials ----------
+
+model Testimonial {
+  id        String   @id @default(cuid())
+  name      String
+  eventType String   @default("")
+  quote     String
+  visible   Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+// ---------- Calendar blocks (manual unavailable dates) ----------
+
+model CalendarBlock {
+  id        String   @id @default(cuid())
+  date      DateTime
+  reason    String   @default("Unavailable")
+  createdAt DateTime @default(now())
+}
+
+// ---------- Numbering counters ----------
+
+model Counter {
+  key   String @id // e.g. "quote-2026", "contract-2026", "receipt-2026"
+  value Int    @default(0)
+}
